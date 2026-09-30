@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.tmp
+
+# Personal data never belongs in the repo: parts, settings, logs, keys
+out/
+imports/
+project.json
+settings.json
+*.log
+.env
