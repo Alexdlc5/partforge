@@ -1,4 +1,5 @@
 # Template: L-bracket | Screw-down angle bracket with a mounting hole
+# Keywords: bracket, l bracket, angle bracket, corner, shelf bracket, mount
 import Part
 from FreeCAD import Vector
 

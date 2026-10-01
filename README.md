@@ -17,7 +17,8 @@ own machine: no cloud, no credits, and your designs stay private.
 ## How a part gets made
 
 1. **Brief.** Say what you're making, what it attaches to, and what material and printer you use.
-   Start blank or from a verified template.
+   PartForge suggests a verified template as you type (a screw, nut, washer, bracket, enclosure,
+   spacer or plate), or the AI designs from scratch.
 2. **Research.** The AI writes web searches from the brief, reads the sources, and keeps cited facts
    such as an M4 clearance hole being 4.5 mm.
 3. **Design.** The AI writes a parametric FreeCAD model. PartForge builds it in a hidden FreeCAD
@@ -97,7 +98,8 @@ flowchart LR
 | [`core.py`](core.py) | projects, settings, LLM client, context budgeting, research, parameter engine, reply protocol, FreeCAD bridge |
 | [`fc_worker.py`](fc_worker.py) | runs inside FreeCAD: builds the model, validates it, projects hidden-line views, maps dimensions, exports STL/STEP/FCStd |
 | [`apps.py`](apps.py) | send-to connectors (one dict per app) |
-| [`templates/`](templates) | verified parametric starting models |
+| [`cad_helpers.py`](cad_helpers.py) | geometry the AI can call: printable ISO threads, hex prisms, nuts (runs inside FreeCAD) |
+| [`templates/`](templates) | verified parametric starting models, matched to requests by keyword |
 
 ## Engineering notes
 
@@ -119,6 +121,15 @@ flowchart LR
   rolling summaries that archive old turns. These are ported from Token Thrift, a separate project
   of the author's. Replies are stored condensed (`[model.py updated, 30 lines]`) because the current
   model is always in context anyway.
+- **Threads that always build.** Helix sweeps plus booleans fail silently in OpenCASCADE: they gave the
+  wrong volume at M3, M4, M10 and M12 in testing. `threaded_rod()` instead twists the thread's cross-section along the
+  axis with an auxiliary helix, producing one valid, watertight solid from M3 to M20. Drawings show threads simplified (ISO
+  6410): the worker re-runs the model with plain cylinders for the views, which cut a screw's top view
+  from 417 s of hidden-line removal to under a second.
+- **Measured AI quality.** [`tests/eval_models.py`](tests/eval_models.py) runs a suite of part requests
+  (screw, nut, washer, knob, gear, phone stand, cable clip, hook) through the real pipeline and scores
+  each one: builds, passes checks, *looks like the requested part*, and has true dimensions. It can
+  compare a model with and without PartForge's templates and helpers.
 - **No function calling required.** The AI talks through fenced ` ```python ` / ` ```memory ` /
   ` ```search ` blocks, so any OpenAI-compatible local model works.
 - **Secrets.** An optional API key is encrypted with Windows DPAPI and never written in plain text.
@@ -157,6 +168,8 @@ python core.py              # parameter engine, context fitting, reply parsing, 
 python apps.py              # connector commands and detection
 python tests/test_app.py    # end-to-end: drives the real window with a scripted AI server,
                             # real FreeCAD builds and live web search (needs FreeCAD installed)
+python tests/eval_models.py --compare   # score a real local model on part requests (needs Ollama)
+python tests/eval_models.py --selftest  # check the shape tests against the verified templates
 ```
 
 The end-to-end test covers:
@@ -167,7 +180,7 @@ The end-to-end test covers:
 - redline → change, and external editor → rebuild
 - print photo syncs in → feedback → vision model → redesign → rebuild
 - send-to, revisions, SVG export, bed check
-- templates, and save/reopen
+- templates, "screw" → a real threaded screw, no placeholder part without an AI, and save/reopen
 
 CI runs the self-checks on Python 3.10, 3.12 and 3.13.
 

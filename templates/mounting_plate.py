@@ -1,4 +1,5 @@
 # Template: Mounting plate | Flat plate with two screw holes
+# Keywords: plate, mounting plate, base plate, adapter plate, mount, flat
 import Part
 from FreeCAD import Vector
 

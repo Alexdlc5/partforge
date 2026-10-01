@@ -12,7 +12,16 @@ import traceback
 
 T0 = time.time()
 OUT = os.environ["PF_OUT"]
-rep = {"ok": False, "parts": {}, "views": {}, "dims": [], "files": {}}
+rep = {"ok": False, "parts": {}, "views": {}, "dims": [], "files": {}, "timing": {}}
+_last = [T0]
+
+
+def lap(step):
+    """Record how long each step took; saved as we go so a timeout still says where it got stuck."""
+    now = time.time()
+    rep["timing"][step] = round(now - _last[0], 2)
+    _last[0] = now
+    save()
 
 
 def save():
@@ -80,12 +89,18 @@ try:
         except Exception as e:
             rep["imports"][fname] = str(e)
 
-    ns = {"__name__": "partforge_model", "load": load}
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import cad_helpers
+
+    ns = {"__name__": "partforge_model", "load": load, **{k: getattr(cad_helpers, k) for k in cad_helpers.__all__}}
     exec(compile(code, "model.py", "exec"), ns)
     defaults = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in ns.get("PARAMS", {}).items()}
     P = {**defaults, **{k: v for k, v in live.items() if k in defaults}}
 
+    lap("load model")
     result = ns["build"](P)
+    lap("build(P)")
     shapes = result if isinstance(result, dict) else {"part": result}
     if not shapes:
         raise ValueError("build(P) returned nothing")
@@ -94,8 +109,9 @@ try:
     for name, s in shapes.items():
         if not isinstance(s, Part.Shape) or s.isNull():
             raise TypeError(f"build(P) returned {type(s).__name__} for '{name}', expected a non-empty Part.Shape")
-        bb = s.BoundBox
-        mesh = MeshPart.meshFromShape(Shape=s, LinearDeflection=0.05, AngularDeflection=0.3)
+        bb = s.optimalBoundingBox()   # BoundBox is loose on spline surfaces (threads)
+        mesh = MeshPart.meshFromShape(Shape=s, LinearDeflection=0.1, AngularDeflection=0.3)  # 0.1 mm: under a print layer
+        lap(f"mesh {name}")
         stl = os.path.join(OUT, f"{name}.stl")
         mesh.write(stl)
         rep["files"][name + ".stl"] = stl
@@ -103,12 +119,23 @@ try:
                               "bbox": [round(bb.XLength, 3), round(bb.YLength, 3), round(bb.ZLength, 3)],
                               "min": [round(bb.XMin, 3), round(bb.YMin, 3), round(bb.ZMin, 3)],
                               "volume": round(s.Volume, 1),
-                              "watertight": bool(mesh.isSolid() and not mesh.hasNonManifolds())}
+                              "watertight": bool(mesh.isSolid() and not mesh.hasNonManifolds()),
+                              # cheap shape descriptors, so tests can tell a screw from a plate
+                              "faces": len(s.Faces),
+                              "curved_faces": sum(f.Surface.TypeId != "Part::GeomPlane" for f in s.Faces)}
         doc.addObject("Part::Feature", name).Shape = s
+        lap(f"check {name}")
 
     whole = Part.makeCompound(list(shapes.values()))
+    drawn = whole
+    if cad_helpers.USED[0]:   # threads: draw the simplified version (see cad_helpers.DRAWING)
+        cad_helpers.DRAWING = True
+        simple = ns["build"](P)
+        drawn = Part.makeCompound(list((simple if isinstance(simple, dict) else {"part": simple}).values()))
+        lap("simplified threads for drawing")
     for v in VIEWS:
-        rep["views"][v] = project(whole, v)
+        rep["views"][v] = project(drawn, v)
+        lap(f"view {v}")
 
     try:
         for d in ns.get("dimensions", lambda P: [])(P):
@@ -127,6 +154,7 @@ try:
     fcstd = os.path.join(OUT, "model.FCStd")
     doc.saveAs(fcstd)
     rep["files"]["model.FCStd"] = fcstd
+    lap("export")
     rep["ok"] = True
 except Exception as exc:
     # Only the model's own frames: that's what the AI (and the user) can fix.

@@ -98,11 +98,15 @@ class IntakeDialog(Dialog):
         if not editing:
             self.templates = {n: c for n, _, c in core.list_templates()}
             ttk.Label(self.body, text="Start from").grid(row=50, column=0, sticky="nw", pady=(10, 4))
-            ttk.Combobox(self.body, textvariable=self.template, state="readonly", width=62,
-                         values=[self.BLANK] + [f"{n}: {d}" for n, d, _ in core.list_templates()]).grid(
-                row=50, column=1, sticky="ew", pady=(10, 4))
-            ttk.Label(self.body, style="Muted.TLabel", text="A verified template gives small local models a working part "
-                      "to adapt instead of starting from nothing.").grid(row=51, column=1, sticky="w")
+            combo = ttk.Combobox(self.body, textvariable=self.template, state="readonly", width=62,
+                                 values=[self.BLANK] + [f"{n}: {d}" for n, d, _ in core.list_templates()])
+            combo.grid(row=50, column=1, sticky="ew", pady=(10, 4))
+            self.picked = False   # once the user picks, stop suggesting
+            combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, "picked", True))
+            for key in ("name", "purpose"):
+                self.widgets[key].bind("<KeyRelease>", lambda e: self.suggest(), add="+")
+            ttk.Label(self.body, style="Muted.TLabel", text="Suggested from what you type. A verified template gives the "
+                      "AI a working part to adapt, and works even without an AI.").grid(row=51, column=1, sticky="w")
         self.widgets["name"].focus_set()
         if editing:
             self.buttons([("Cancel", self.destroy, "TButton"), ("Save", lambda: self.finish(False), "TButton"),
@@ -111,8 +115,16 @@ class IntakeDialog(Dialog):
             self.buttons([("Cancel", self.destroy, "TButton"), ("Create without research", lambda: self.finish(False), "TButton"),
                           ("Create and research", lambda: self.finish(True), "Accent.TButton")])
 
+    def brief(self):
+        return {k: (w.get() if isinstance(w, ttk.Entry) else w.get("1.0", "end")).strip() for k, w in self.widgets.items()}
+
+    def suggest(self):
+        if not self.picked:
+            t = core.match_template(self.brief())
+            self.template.set(f"{t[0]}: {t[1]}" if t else self.BLANK)
+
     def finish(self, research):
-        brief = {k: (w.get() if isinstance(w, ttk.Entry) else w.get("1.0", "end")).strip() for k, w in self.widgets.items()}
+        brief = self.brief()
         if not brief["name"]:
             messagebox.showwarning("Part name", "Give the part a name.", parent=self)
             return
@@ -567,7 +579,11 @@ class DrawingCanvas(tk.Canvas):
                 self.draw_view(v, data, stacks)
             self.draw_markups(views)
         else:
-            msg = "Designing the first version…" if self.app.busy_llm or self.busy else "No geometry yet. Press Build (F5)."
+            designed = self.app.project.data.get("designed", True)
+            msg = ("Designing the first version…" if self.app.busy_llm or self.busy else
+                   "No geometry yet. Press Build (F5)." if designed else
+                   "Nothing designed yet: ask the AI in the chat." if self.app.llm_ok else
+                   "No local AI is running, so this part can't be designed yet. Setup steps are in the chat.")
             self.create_text(W / 2, H / 2, text=msg, fill=C["muted"], font=("Segoe UI", 13))
         self.draw_titleblock(W, H)
         self.create_text(14, 12, anchor="nw", fill=C["muted"], font=SMALL, tags="tip",
@@ -1323,8 +1339,8 @@ class App(tk.Tk):
             try:
                 self.q.put((done, fn()))
             except Exception as e:  # noqa: surfaced to the user by the fail handler
-                if isinstance(e, core.LLMError):
-                    core.log.warning("AI: %s", e)
+                if isinstance(e, (core.LLMError, core.SearchBlocked)):
+                    core.log.warning("%s", e)
                 else:
                     core.log.exception("background task failed")
                 self.q.put((fail or self._bg_fail, e))
@@ -1394,6 +1410,9 @@ class App(tk.Tk):
         self.save()
         brief, research, template = res
         proj = core.Project.create(self.settings["projects_dir"], brief, template or core.STARTER)
+        if not template:   # blank: nothing designed yet; don't show (or let the AI copy) a placeholder part
+            proj.data["designed"] = False
+            proj.memory["params"] = {}
         self.first_turn = core.FIRST_TURN_TEMPLATE if template else core.FIRST_TURN
         self.load_project(proj)
         if template:
@@ -1401,12 +1420,8 @@ class App(tk.Tk):
         self.say("PartForge", f"Created {proj.folder}.", "sys")
         if research and self.settings["web_search"]:
             self.run_research(then_design=True)
-        elif self.llm_ok:
-            self.send(self.first_turn, auto=True)
         else:
-            self.say("PartForge", NO_AI_HELP.format(url=self.settings["base_url"]) +
-                     "\n\nMeanwhile, here's a starter plate you can edit on the drawing.", "sys")
-            self.request_build("user", 0)
+            self._first_design()
 
     def open_project(self, path=None):
         if not path:
@@ -1421,7 +1436,7 @@ class App(tk.Tk):
             return
         self.save()
         self.load_project(proj)
-        if not self.report:
+        if not self.report and proj.data.get("designed", True):
             self.request_build("user", 0)
 
     def load_project(self, proj):
@@ -1632,6 +1647,7 @@ class App(tk.Tk):
             return False
         self.push_undo()
         self.project.set_code(text)
+        self.project.data["designed"] = True
         self.project.log_change("model.py edited by hand")
         self.mark_dirty()
         return True
@@ -1724,6 +1740,7 @@ class App(tk.Tk):
                     else:
                         self.push_undo()
                         self.project.set_code(text)
+                        self.project.data["designed"] = True
                         self.project.log_change("model.py edited in an external editor")
                         self.say("PartForge", "model.py changed in your editor. Rebuilding.", "sys")
                         self.refresh_all(code=True)
@@ -1915,6 +1932,7 @@ class App(tk.Tk):
             else:
                 self.push_undo()
                 added, removed = proj.set_code(code)
+                proj.data["designed"] = True
                 if added or removed:
                     self.say("PartForge", "Parameters " + ", ".join([f"+{a}" for a in added] + [f"−{r}" for r in removed]), "sys")
                 rebuild = True
@@ -1972,17 +1990,22 @@ class App(tk.Tk):
             self.auto_ask("The search results are in your research notes. Continue the design.")
 
     def _research_failed(self, e, then_design):
-        self.say("PartForge", f"Research failed ({e}). Continuing without it.", "err")
+        self.say("PartForge", f"{e} Continuing without research." if isinstance(e, core.SearchBlocked)
+                 else f"Research failed ({e}). Continuing without it.", "err")
         if then_design:
             self._first_design()
 
     def _first_design(self):
         if self.llm_ok:
             self.send(getattr(self, "first_turn", core.FIRST_TURN), auto=True)
+        elif self.project.data.get("designed", True):
+            self.say("PartForge", NO_AI_HELP.format(url=self.settings["base_url"]) +
+                     "\n\nMeanwhile the template is ready: edit it on the drawing.", "sys")
         else:
             self.say("PartForge", NO_AI_HELP.format(url=self.settings["base_url"]) +
-                     "\n\nMeanwhile, here's a starter plate you can edit on the drawing.", "sys")
-            self.request_build("user", 0)
+                     f"\n\nWithout an AI, PartForge can only start from a template, and none matches "
+                     f"\"{self.project.name}\". Once the AI is running, just ask for it in the chat.", "err")
+            self.drawing.redraw()
 
     # --------------------------------------------------------------- print feedback loop
     def inbox_photos(self):
@@ -1993,12 +2016,15 @@ class App(tk.Tk):
     def _watch_inbox(self):
         # ponytail: scans the folder on the UI thread every 4 s; move to a thread if a huge camera folder lags
         n = len(self.inbox_photos())
-        self.photo_btn.configure(text=f"📷 Print feedback ({n} new)" if n else "📷 Print feedback",
-                                 style="Send.TButton" if n else "Tool.TButton")
+        self._photo_btn(n)
         if n > self.inbox_count:
             self.st_build.configure(text=f"{n} new print photo(s): click 📷 Print feedback")
         self.inbox_count = n
         self.after(4000, self._watch_inbox)
+
+    def _photo_btn(self, n):
+        self.photo_btn.configure(text=f"📷 Print feedback ({n} new)" if n else "📷 Print feedback",
+                                 style="Send.TButton" if n else "Tool.TButton")
 
     def choose_inbox(self):
         path = InboxDialog(self, self.settings["photo_inbox"]).run()
@@ -2035,6 +2061,7 @@ class App(tk.Tk):
         prints.append(rec)
         proj.data["photo_since"] = time.time()
         self.inbox_count = 0
+        self._photo_btn(0)
         self.save()
         self.say("PartForge", f"📷 Print feedback #{rid}: {len(rels)} photo(s). {notes}", "sys")
         self.nb.select(self.prints_tab)

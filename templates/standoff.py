@@ -1,4 +1,5 @@
 # Template: Spacer / standoff | Round spacer with a through hole (PCB standoffs, shims)
+# Keywords: spacer, standoff, shim, bushing, sleeve, pcb standoff
 import Part
 from FreeCAD import Vector
 

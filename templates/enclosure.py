@@ -1,4 +1,5 @@
 # Template: Enclosure with lid | Open box plus a push-fit lid with a locating lip (prints as two parts)
+# Keywords: box, enclosure, case, housing, container, lid, project box
 import Part
 from FreeCAD import Vector
 

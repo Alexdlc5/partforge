@@ -370,16 +370,26 @@ def parse_ddg(body):
     return hits
 
 
+class SearchBlocked(Exception):
+    pass
+
+
 def web_search(query, n=5):
+    blocked = 0
     for url in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
         try:
             with _get(url, {"q": query}) as r:
-                hits = parse_ddg(r.read().decode("utf-8", "replace"))
+                body = r.read().decode("utf-8", "replace")
         except OSError as e:
             log.warning("search %s failed: %s", url, e)
             continue
+        hits = parse_ddg(body)
         if hits:
             return hits[:n]
+        blocked += "anomaly" in body.lower() or "captcha" in body.lower()
+    if blocked == 2:   # DuckDuckGo wants a human check; never try to get around it, just say so
+        raise SearchBlocked("DuckDuckGo is temporarily blocking automated searches from this PC "
+                            "(too many searches). Research was skipped; try again in a while.")
     return []
 
 
@@ -700,12 +710,27 @@ def list_templates():
     return out
 
 
+def match_template(brief):
+    """Best template for a brief by its '# Keywords:' line, or None. 'screw' -> Screw / bolt, 'M8 nut' -> Nut."""
+    text = " ".join(brief.get(k, "") for k in ("name", "purpose", "search")).lower()
+    words = set(re.findall(r"[a-z0-9]+", text))
+    words |= {w[:-1] for w in words if len(w) > 3 and w.endswith("s")}          # screws -> screw
+    best, best_score = None, 0
+    for t in list_templates():
+        m = re.search(r"^# Keywords:(.*)$", t[2], re.M)
+        kws = [k.strip() for k in m[1].lower().split(",")] if m else []
+        score = sum((2 if " " in k else 1) for k in kws if (k in text if " " in k else k in words))
+        if score > best_score:
+            best, best_score = t, score
+    return best
+
+
 def new_data(brief):
     return {"version": 1, "app": VERSION, "brief": brief, "created": time.time(),
             "research": {"queries": [], "sources": [], "notes": ""},
             "memory": {"params": {}, "features": [], "facts": {}, "decisions": [], "questions": [], "changes": []},
             "chat": [], "summary": "", "markups": [], "builds": 0, "revisions": [],
-            "prints": [], "photo_since": time.time()}
+            "prints": [], "photo_since": time.time(), "designed": True}
 
 
 class Project:
@@ -779,9 +804,10 @@ def run_build(freecad_cmd, project_folder, code, values, timeout=240):
     out.mkdir(exist_ok=True)
     HOME.mkdir(parents=True, exist_ok=True)
     worker = HOME / "fc_worker.py"          # short, space-free path: freecadcmd chokes on long ones
-    src = (HERE / "fc_worker.py").read_text("utf-8")
-    if not worker.exists() or worker.read_text("utf-8") != src:
-        write_atomic(worker, src)
+    for name in ("fc_worker.py", "cad_helpers.py"):
+        src, dst = (HERE / name).read_text("utf-8"), HOME / name
+        if not dst.exists() or dst.read_text("utf-8") != src:
+            write_atomic(dst, src)
     write_atomic(out / "build_model.py", code)
     write_atomic(out / "params.json", json.dumps(values))
     (out / "report.json").unlink(missing_ok=True)
@@ -791,7 +817,13 @@ def run_build(freecad_cmd, project_folder, code, values, timeout=240):
         p = subprocess.run([freecad_cmd, str(worker)], env=env, cwd=str(out), capture_output=True,
                            timeout=timeout, creationflags=NO_WINDOW)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"FreeCAD took longer than {timeout} s and was stopped."}
+        try:
+            timing = json.loads((out / "report.json").read_text("utf-8")).get("timing", {})
+        except (OSError, ValueError):
+            timing = {}
+        done = ", ".join(f"{k} {v}s" for k, v in timing.items())
+        return {"ok": False, "error": f"FreeCAD took longer than {timeout} s and was stopped"
+                + (f" after: {done}. The next step was too slow; simplify the geometry." if done else ".")}
     except OSError as e:
         return {"ok": False, "error": f"Couldn't start FreeCAD ({freecad_cmd}): {e}"}
     try:
@@ -859,6 +891,17 @@ def dimensions(P):
     return [("length", (0, 0, 5), (P["length"], 0, 5), "top")]
 ```
 
+Model exactly the object the brief names. A request for a screw is the screw itself, not a plate with screw holes;
+a gear has teeth; a hook has a hook. Orient it the way it prints best (flat face down, threads vertical).
+
+Built-in helpers, already available in model.py without importing (tested, always one valid solid):
+  threaded_rod(d, pitch, length, z0=0)  real printable 60° external thread on the Z axis
+                                        for an internal thread cut threaded_rod(d + 2*FDM_CLEARANCE, pitch, ...)
+  hex_prism(across_flats, height, z0=0) hexagonal prism on the Z axis (bolt heads, nuts)
+  nut_blank(d, height)                  complete hex nut that fits threaded_rod(d, ...)
+  ISO_PITCH[d], HEX_AF[d]               ISO coarse pitch and hex across-flats for M2..M24
+Use these instead of writing your own helix sweeps.
+
 Rules: millimetres. Z up, part resting on Z=0, front face at minimum Y. Views: "top" looks down Z (X,Y),
 "front" looks from -Y (X,Z), "right" looks from +X (Y,Z). Only Part, FreeCAD, math. Never read files or the network;
 bodies the user modelled by hand are available as load("name.step") (listed under IMPORTED BODIES).
@@ -879,8 +922,8 @@ Reply with short prose first, then the blocks."""
 FIRST_TURN_TEMPLATE = ("Adapt the starting model (a verified template) to the brief and research: rename, add and "
                        "remove parameters and features as needed, keep what already works. Include features, decisions "
                        "and open questions in a memory block.")
-FIRST_TURN = ("Create the first version of this part from the brief and research. Replace the starter plate. "
-              "Include features, decisions and open questions in a memory block.")
+FIRST_TURN = ("Create the first version of this part from the brief and research: the object itself, with its real "
+              "shape. Include features, decisions and open questions in a memory block.")
 
 
 def memory_text(project, report=None):
@@ -924,7 +967,8 @@ def build_messages(project, settings, report):
         "# PART MEMORY\n" + memory_text(project, report),
         "# RESEARCH NOTES\n" + notes if notes.strip() else "",
         "# LAST BUILD\n" + report_text(report, project.params, settings.get("bed")),
-        "# CURRENT model.py\n```python\n" + project.code + "```",
+        "# CURRENT model.py\n```python\n" + project.code + "```" if project.data.get("designed", True) else
+        "# CURRENT model.py\nNothing designed yet. Write model.py from scratch for the part in the brief.",
         "# EARLIER CONVERSATION (summary)\n" + project.data["summary"] if project.data["summary"] else "",
     ] if s)
     budget = max(500, ctx - reply_reserve - est_tokens(system))
@@ -1017,6 +1061,11 @@ if __name__ == "__main__":
         assert image_data_url(new).startswith("data:image/")
     assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b", "qwen2.5vl:7b"]) == "qwen2.5vl:7b"
     assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b"]) == ""
+    pick = lambda **b: (match_template(b) or ("none",))[0]
+    assert pick(name="screw") == "Screw / bolt" and pick(name="M8 bolts") == "Screw / bolt"
+    assert pick(name="hex nut") == "Nut" and pick(name="washer for M6") == "Washer"
+    assert pick(name="sensor box", purpose="enclosure with a lid") == "Enclosure with lid"
+    assert pick(name="phone stand") == "none", "no forced match"
     rec = {"id": 2, "build": 7, "photos": ["a", "b"], "notes": "lid too tight", "observations": ""}
     assert "lid too tight" in feedback_message(rec) and "go by my notes" in feedback_message(rec)
     print("core self-check passed")
