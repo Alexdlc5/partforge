@@ -8,7 +8,7 @@ import math
 import Part
 from FreeCAD import Vector
 
-__all__ = ["ISO_PITCH", "HEX_AF", "FDM_CLEARANCE", "threaded_rod", "hex_prism", "nut_blank"]
+__all__ = ["ISO_PITCH", "HEX_AF", "FDM_CLEARANCE", "threaded_rod", "hex_prism", "nut_blank", "spur_gear"]
 
 # ISO 261 coarse pitch and ISO 4032 hex across-flats, by nominal diameter (mm)
 ISO_PITCH = {2: 0.4, 2.5: 0.45, 3: 0.5, 4: 0.7, 5: 0.8, 6: 1.0, 8: 1.25, 10: 1.5, 12: 1.75, 16: 2.0, 20: 2.5, 24: 3.0}
@@ -55,6 +55,37 @@ def hex_prism(across_flats, height, z0=0.0):
     r = across_flats / math.sqrt(3)
     pts = [Vector(r * math.cos(math.radians(60 * i)), r * math.sin(math.radians(60 * i)), z0) for i in range(7)]
     return Part.Face(Part.makePolygon(pts)).extrude(Vector(0, 0, height))
+
+
+def spur_gear(module, teeth, thickness, bore=0.0, pressure_angle=20.0, z0=0.0):
+    """Involute spur gear on the Z axis. Outside diameter = module * (teeth + 2); pitch diameter = module * teeth.
+    Two gears mesh when they share a module; centre distance = module * (teeth_a + teeth_b) / 2."""
+    z, m, a = int(round(teeth)), module, math.radians(pressure_angle)
+    r = m * z / 2
+    rb, ra, rf = r * math.cos(a), r + m, max(r - 1.25 * m, 0.5 * r)   # base, tip, root radii
+
+    def inv(t):
+        return math.tan(t) - t
+    half = math.pi / (2 * z) + inv(a)        # half the tooth's angular width at the base circle
+    start = max(rb, rf)
+
+    def flank(sign, centre):
+        pts = []
+        for i in range(9):
+            rr = start + (ra - start) * i / 8
+            ang = centre + sign * (half - inv(math.acos(min(1.0, rb / rr))))
+            pts.append((rr * math.cos(ang), rr * math.sin(ang)))
+        return pts
+    outline = []
+    for k in range(z):
+        c = 2 * math.pi * k / z
+        gap = c - math.pi / z
+        outline += [(rf * math.cos(gap), rf * math.sin(gap))] + flank(-1, c) + flank(1, c)[::-1]
+    outline.append(outline[0])
+    gear = Part.Face(Part.makePolygon([Vector(x, y, z0) for x, y in outline])).extrude(Vector(0, 0, thickness))
+    if bore > 0:
+        gear = gear.cut(Part.makeCylinder(bore / 2, thickness + 2, Vector(0, 0, z0 - 1)))
+    return gear
 
 
 def nut_blank(d, height, across_flats=None):

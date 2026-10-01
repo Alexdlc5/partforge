@@ -129,7 +129,12 @@ flowchart LR
 - **Measured AI quality.** [`tests/eval_models.py`](tests/eval_models.py) runs a suite of part requests
   (screw, nut, washer, knob, gear, phone stand, cable clip, hook) through the real pipeline and scores
   each one: builds, passes checks, *looks like the requested part*, and has true dimensions. It can
-  compare a model with and without PartForge's templates and helpers.
+  compare a model with and without PartForge's templates and helpers. On `qwen2.5-coder:14b` (RTX 3080,
+  10 GB) the first run averaged **68/100**. A gear failed on a float-vs-int bug, a cable clip was handed
+  the screw template, and Ollama was silently cutting prompts to a 4k context. After the fixes it found,
+  the same suite averages **96/100**, with 7 of 8 parts at 100
+  ([baseline](tests/eval_results/qwen2.5-coder_14b-1-baseline.md) →
+  [after fixes](tests/eval_results/qwen2.5-coder_14b-2-after-fixes.md)).
 - **No function calling required.** The AI talks through fenced ` ```python ` / ` ```memory ` /
   ` ```search ` blocks, so any OpenAI-compatible local model works.
 - **Secrets.** An optional API key is encrypted with Windows DPAPI and never written in plain text.

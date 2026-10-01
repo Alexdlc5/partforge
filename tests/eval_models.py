@@ -10,6 +10,7 @@ Score out of 100: builds 40, checks clean 20, looks like the requested part 30, 
 Results are written to tests/eval_results/<model>-<date>.md.
 """
 import argparse
+import copy
 import os
 import sys
 import tempfile
@@ -91,7 +92,7 @@ def design(settings, name, purpose, use_templates, fc):
         proj.data["designed"] = False
         proj.memory["params"] = {}
     ask = core.FIRST_TURN_TEMPLATE if t else core.FIRST_TURN
-    rep, notes = None, [f"template: {t[0]}" if t else "from scratch"]
+    rep, good, notes = None, None, [f"template: {t[0]}" if t else "from scratch"]
     for attempt in range(3):
         proj.chat_add("user", ask)
         reply = core.chat(settings, core.build_messages(proj, settings, rep))
@@ -113,10 +114,19 @@ def design(settings, name, purpose, use_templates, fc):
             continue
         rep = core.run_build(fc, proj.folder, proj.code, proj.values())
         if rep.get("ok"):
-            return rep, proj.params, attempt + 1, notes
+            good = (rep, copy.deepcopy(proj.params), attempt + 1)
+            probs = core.report_problems(rep, proj.params)
+            if not probs:
+                return rep, proj.params, attempt + 1, notes
+            # same follow-up the app sends after a build that works but fails a check
+            notes.append(f"{len(probs)} check(s) failed")
+            ask = "The build succeeded but has problems: " + "; ".join(probs) + ". Fix them in model.py."
+            continue
         err = rep.get("error", "")
         notes.append("build failed: " + (err.strip().splitlines() or ["?"])[-1][:90])
         ask = f"Your model.py failed to build:\n{err[-1500:]}\nFix it."
+    if good:   # the app keeps showing the last good build when a later fix breaks
+        return good[0], good[1], good[2], notes
     return rep, proj.params, 3, notes
 
 

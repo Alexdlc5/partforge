@@ -96,7 +96,13 @@ try:
     ns = {"__name__": "partforge_model", "load": load, **{k: getattr(cad_helpers, k) for k in cad_helpers.__all__}}
     exec(compile(code, "model.py", "exec"), ns)
     defaults = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in ns.get("PARAMS", {}).items()}
-    P = {**defaults, **{k: v for k, v in live.items() if k in defaults}}
+    class Params(dict):
+        """P with whole-number params kept as int (range(P["teeth"]) works) and a clear error for typos."""
+        def __missing__(self, key):
+            raise KeyError(f"P[{key!r}] isn't a parameter. Add {key!r} to PARAMS or use one of: {', '.join(self)}")
+
+    P = Params({k: (int(round(v)) if isinstance(defaults[k], int) and float(v).is_integer() else v)
+                for k, v in {**defaults, **{k: v for k, v in live.items() if k in defaults}}.items()})
 
     lap("load model")
     result = ns["build"](P)

@@ -787,8 +787,9 @@ def list_templates():
 
 
 def match_template(brief):
-    """Best template for a brief by its '# Keywords:' line, or None. 'screw' -> Screw / bolt, 'M8 nut' -> Nut."""
-    text = " ".join(brief.get(k, "") for k in ("name", "purpose", "search")).lower()
+    """Best template for a brief by its '# Keywords:' line, or None. 'screw' -> Screw / bolt, 'M8 nut' -> Nut.
+    Only the part's name counts: a "cable clip" whose description says "screw mounted" is not a screw."""
+    text = brief.get("name", "").lower()
     words = set(re.findall(r"[a-z0-9]+", text))
     words |= {w[:-1] for w in words if len(w) > 3 and w.endswith("s")}          # screws -> screw
     best, best_score = None, 0
@@ -919,15 +920,21 @@ def report_problems(rep, params, bed=None):
         if not p["valid"]:
             probs.append(f"{name}: invalid solid")
         if p["solids"] != 1:
-            probs.append(f"{name}: {p['solids']} separate solids (expected 1)")
+            probs.append(f"{name}: {p['solids']} separate solids (expected 1): make the pieces overlap by 0.1 mm "
+                         "and fuse() them into one")
         if not p["watertight"]:
-            probs.append(f"{name}: mesh not watertight (bodies touching only along an edge?)")
+            probs.append(f"{name}: mesh not watertight: bodies touch only along an edge or face; overlap them by "
+                         "0.1 mm before fuse()")
         if p["min"][2] < -0.01:
             probs.append(f"{name}: extends below Z=0")
     for d in (rep or {}).get("dims", []):
-        want = params.get(d["param"], {}).get("value")
+        p = params.get(d["param"], {})
+        want = p.get("value") if p.get("unit", "mm") in ("mm", "cm", "m", "in") else None   # counts aren't distances
         if want is not None and abs(d["measured"] - want) > 0.05:
-            probs.append(f"dimension {d['param']} is drawn {fmt(d['measured'])} but the parameter is {fmt(want)}")
+            hint = (f" (its two points coincide in the {d['view']} view: that distance runs along the viewing "
+                    "direction, so draw it on another view)" if d["measured"] < 0.01 else
+                    " (the two points in dimensions() must be exactly that far apart)")
+            probs.append(f"dimension {d['param']} is drawn {fmt(d['measured'])} but the parameter is {fmt(want)}{hint}")
     if (rep or {}).get("dim_error"):
         probs.append("dimensions() failed: " + rep["dim_error"].strip().splitlines()[-1])
     return probs
@@ -976,13 +983,28 @@ Built-in helpers, already available in model.py without importing (tested, alway
   hex_prism(across_flats, height, z0=0) hexagonal prism on the Z axis (bolt heads, nuts)
   nut_blank(d, height)                  complete hex nut that fits threaded_rod(d, ...)
   ISO_PITCH[d], HEX_AF[d]               ISO coarse pitch and hex across-flats for M2..M24
-Use these instead of writing your own helix sweeps.
+  spur_gear(module, teeth, thickness, bore=0, pressure_angle=20, z0=0)
+                                        involute spur gear on the Z axis; outside diameter = module*(teeth+2)
+Use these instead of writing your own helix sweeps or tooth profiles.
+
+FreeCAD API that exists (do not invent others):
+  Part.makeBox(l, w, h, Vector(x,y,z))   Part.makeCylinder(r, h, Vector(base), Vector(axis))
+  Part.makeCone(r1, r2, h, base, axis)   Part.makeSphere(r, center)   Part.makeTorus(R, r, center)
+  Part.makePolygon([Vector, ...]) -> wire (repeat the first point to close)   Part.Face(wire).extrude(Vector(0,0,h))
+  face.revolve(Vector(0,0,0), Vector(0,0,1), 360)   a.fuse(b)  a.cut(b)  a.common(b)  shape.removeSplitter()
+  shape.makeFillet(r, [edges])   shape.makeChamfer(d, [edges])   (methods on a shape; pick edges from shape.Edges)
+  shape.translate(Vector)   shape.rotate(Vector(center), Vector(axis), degrees)   both change shape in place
+Whole-number parameters (teeth, counts) stay int when their default is an int, e.g. "teeth": (20, "", ...).
+dimensions(): each point pair must be exactly P[param] apart *in that view*. A distance along Y is invisible on the
+front view (measures 0): put it on the top or right view. A diameter d is (-d/2, 0, z) to (d/2, 0, z).
 
 Rules: millimetres. Z up, part resting on Z=0, front face at minimum Y. Views: "top" looks down Z (X,Y),
 "front" looks from -Y (X,Z), "right" looks from +X (Y,Z). Only Part, FreeCAD, math. Never read files or the network;
 bodies the user modelled by hand are available as load("name.step") (listed under IMPORTED BODIES).
 Derive dependent sizes from P inside build() so the part stays valid when the user changes a value.
-Put every parameter in dimensions() on the view where it reads best. Printed parts must be one watertight solid.
+Put every length parameter in dimensions() on the view where it reads best; counts, angles and ratios (teeth,
+module, pressure angle) are not distances, so leave them out. Printed parts must be one watertight solid: overlap
+pieces by 0.1 mm before fuse(). Fillet or chamfer only the few edges that need it (all edges usually fails).
 The LIVE parameter values below are what the user set on the drawing; they win over your defaults.
 To change a value without rewriting the code, send only a memory block with "params".
 
@@ -1146,6 +1168,8 @@ if __name__ == "__main__":
     assert pick(name="hex nut") == "Nut" and pick(name="washer for M6") == "Washer"
     assert pick(name="sensor box", purpose="enclosure with a lid") == "Enclosure with lid"
     assert pick(name="phone stand") == "none", "no forced match"
+    assert pick(name="cable clip", purpose="clip for a desk edge, screw mounted") == "none", "the name decides"
+    assert pick(name="wall hook", purpose="hook with two screw holes") == "none"
     rec = {"id": 2, "build": 7, "photos": ["a", "b"], "notes": "lid too tight", "observations": ""}
     assert "lid too tight" in feedback_message(rec) and "go by my notes" in feedback_message(rec)
     print("core self-check passed")
