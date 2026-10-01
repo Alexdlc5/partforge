@@ -88,7 +88,8 @@ class Settings(dict):
     DEFAULTS = {"base_url": PRESETS["Ollama (local)"], "model": "", "api_key_enc": "", "context_tokens": 16384,
                 "lean_coding": True, "fast_reasoning": True, "auto_fix": True, "web_search": True,
                 "freecad_cmd": "", "projects_dir": str(DEFAULT_PROJECTS), "recent": [], "last_project": "",
-                "quick_send": "creality-print", "apps_custom": [], "app_paths": {}, "bed": [220, 220, 250]}
+                "quick_send": "creality-print", "apps_custom": [], "app_paths": {}, "bed": [220, 220, 250],
+                "photo_inbox": "", "vision_model": ""}
     PATH = HOME / "settings.json"
 
     @classmethod
@@ -255,6 +256,90 @@ def chat(settings, messages, on_delta=None, stop=None, max_tokens=None, temperat
                 if on_delta:
                     on_delta(piece)
     return THINK.sub("", "".join(out)).strip()
+
+
+# ----------------------------------------------------------------------------- print photos
+# Phones upload to Google Drive / OneDrive / Dropbox, which sync to a local folder. PartForge watches that
+# folder, so every cloud works with no sign-in code of its own.
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+VISION_HINTS = ("vl", "vision", "llava", "gemma3", "minicpm-v", "moondream", "pixtral")
+
+
+def photo_folders():
+    """Cloud-synced folders that exist on this PC: [(label, path)]. A Google Drive pick gets its own subfolder."""
+    home, out = Path.home(), []
+    od = Path(os.environ.get("OneDrive") or home / "OneDrive")
+    drives = [Path(f"{c}:/My Drive") for c in "DEFGHIJKLMNOPQRSTUVWXYZ"] + [home / "Google Drive" / "My Drive", home / "My Drive"]
+    out += [("Google Drive", d / "PartForge Photos") for d in drives if d.is_dir()]
+    out += [(label, p) for label, p in (("OneDrive camera uploads", od / "Pictures" / "Camera Roll"),
+                                        ("Dropbox camera uploads", home / "Dropbox" / "Camera Uploads")) if p.is_dir()]
+    out.append(("PartForge photo folder (copy photos in yourself)", HOME / "Photo inbox"))
+    return out
+
+
+def new_photos(folder, since, depth=2):
+    """Images under folder modified after `since`, newest first. Shallow walk: camera folders nest by year/month."""
+    found = []
+
+    def walk(d, level):
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        for e in entries:
+            if e.is_dir() and level < depth:
+                walk(e.path, level + 1)
+            elif e.is_file() and os.path.splitext(e.name)[1].lower() in IMAGE_EXT:
+                mtime = e.stat().st_mtime
+                if mtime > since:
+                    found.append((mtime, e.path))
+    if folder and os.path.isdir(folder):
+        walk(folder, 0)
+    return [p for _, p in sorted(found, reverse=True)]
+
+
+def image_data_url(path, max_px=1280):
+    """Phone photos are huge; local vision models want ~1k px. Pillow (optional) shrinks them, else send as-is."""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+        img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        img.thumbnail((max_px, max_px))
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=85)
+        data, mime = buf.getvalue(), "image/jpeg"
+    except (ImportError, OSError, ValueError):  # no Pillow, or a format it can't read: send the file as-is
+        # ponytail: full-size upload; fine for local servers, slow for big photos
+        data = Path(path).read_bytes()
+        mime = {".png": "image/png", ".webp": "image/webp"}.get(Path(path).suffix.lower(), "image/jpeg")
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def pick_vision_model(settings, models):
+    if settings.get("vision_model") in models:
+        return settings["vision_model"]
+    return next((m for m in models if any(h in m.lower() for h in VISION_HINTS)), "")
+
+
+def describe_photos(settings, model, photos, project, notes):
+    """A vision model reports what the print photos show; its text feeds the design model (which may be text-only)."""
+    params = "; ".join(f"{k}={fmt(p['value'])}{p['unit']}" for k, p in project.params.items())
+    text = (f"These are photos of a 3D print of '{project.name}'.\nBrief: {brief_text(project.data['brief'])}\n"
+            f"Design parameters: {params}\n"
+            f"The user says: {notes or 'nothing'}\n\nDescribe only what you can actually see that matters for a "
+            "redesign: fit problems, warping, layer splits, weak or broken features, stringing, sagging overhangs, "
+            "sizes (only if a ruler or caliper is visible). Terse bullet points. Say when you can't tell.")
+    content = [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": image_data_url(p)}} for p in photos]
+    s = Settings(settings)
+    s["model"] = model
+    return chat(s, [{"role": "user", "content": content}], max_tokens=800)
+
+
+def feedback_message(record):
+    return (f"Print feedback #{record['id']}: I printed build {record['build']} and took {len(record['photos'])} photo(s).\n"
+            f"My notes: {record['notes'] or '(none)'}\n"
+            f"What the photos show: {record['observations'] or '(no vision model, so go by my notes)'}\n"
+            "Redesign the part to fix these problems and keep what works. Say briefly what you changed.")
 
 
 def asker(settings):
@@ -619,7 +704,8 @@ def new_data(brief):
     return {"version": 1, "app": VERSION, "brief": brief, "created": time.time(),
             "research": {"queries": [], "sources": [], "notes": ""},
             "memory": {"params": {}, "features": [], "facts": {}, "decisions": [], "questions": [], "changes": []},
-            "chat": [], "summary": "", "markups": [], "builds": 0, "revisions": []}
+            "chat": [], "summary": "", "markups": [], "builds": 0, "revisions": [],
+            "prints": [], "photo_since": time.time()}
 
 
 class Project:
@@ -815,6 +901,9 @@ def memory_text(project, report=None):
     reds = [r for r in project.data["markups"] if r["status"] != "resolved"]
     if reds:
         parts.append("REDLINES: " + "; ".join(f"#{r['id']} {r['view'].upper()} view near {r['where']}: {r['text']}" for r in reds))
+    for p in project.data.get("prints", [])[-2:]:
+        parts.append(f"PRINT FEEDBACK #{p['id']} (printed build {p['build']}): notes: {p['notes'] or '-'}; "
+                     f"photos show: {(p.get('observations') or '-')[:600]}")
     imports = (report or {}).get("imports") or {}
     if imports:
         parts.append("IMPORTED BODIES (load(name)); bbox min xyz, max xyz: " + "; ".join(
@@ -917,4 +1006,17 @@ if __name__ == "__main__":
     assert probs and "fit" in probs[0], probs
     assert not report_problems({"parts": {"p": {**part, "bbox": [240, 100, 10]}}}, {}, [220, 220, 250])  # fits upright
     assert parse_ddg(body) == [{"title": "A t", "url": "https://example.com/a", "snippet": "snip & more"}]
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        old, new, deep = Path(d, "old.jpg"), Path(d, "new.PNG"), Path(d, "2026", "10", "deep.jpg")
+        deep.parent.mkdir(parents=True)
+        for f in (old, new, deep, Path(d, "notes.txt")):
+            f.write_bytes(b"\x89PNG\r\n\x1a\n")
+        os.utime(old, (1000, 1000))
+        assert set(new_photos(d, 5000)) == {str(new), str(deep)}, "new images only, two folders deep, any case"
+        assert image_data_url(new).startswith("data:image/")
+    assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b", "qwen2.5vl:7b"]) == "qwen2.5vl:7b"
+    assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b"]) == ""
+    rec = {"id": 2, "build": 7, "photos": ["a", "b"], "notes": "lid too tight", "observations": ""}
+    assert "lid too tight" in feedback_message(rec) and "go by my notes" in feedback_message(rec)
     print("core self-check passed")

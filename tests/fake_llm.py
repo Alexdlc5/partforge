@@ -47,6 +47,10 @@ calls = []
 
 def answer(messages):
     last = messages[-1]["content"]
+    if isinstance(last, list):  # a vision request: text + images
+        images = sum(part.get("type") == "image_url" for part in last)
+        calls.append(f"vision with {images} image(s)")
+        return "- Visible layer split along the bend between base and wall\n- Wall looks thin for the load"
     calls.append(last[:80])
     if "web search queries" in last:
         return '["M4 screw clearance hole size", "3D printed L bracket design wall thickness PLA"]'
@@ -59,6 +63,8 @@ def answer(messages):
         return "Trying a variant.\n```python\n" + BROKEN + "```"
     if "failed to build" in last or "now fails" in last or "rejected" in last:
         return "Fixed the undefined name.\n```python\n" + BRACKET + "```"
+    if last.startswith("Print feedback"):
+        return 'Thickened the wall to stop the layer split.\n```memory\n{"params": {"thickness": 8}, "decisions": ["8 mm wall after print #1 split"]}\n```'
     if last.startswith("Redline"):
         return 'Thickened the wall as marked.\n```memory\n{"params": {"thickness": 6}, "decisions": ["thicker wall per redline"]}\n```'
     if "Create the first version" in last:
@@ -71,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        body = json.dumps({"data": [{"id": "fake-coder"}]}).encode()
+        body = json.dumps({"data": [{"id": "fake-coder"}, {"id": "fake-vision-vl"}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

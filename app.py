@@ -172,6 +172,17 @@ class SettingsDialog(Dialog):
             ttk.Label(b, text=label).grid(row=r, column=0, sticky="w", pady=3)
             ttk.Entry(b, textvariable=var, width=50).grid(row=r, column=1, sticky="ew", pady=3)
             ttk.Button(b, text="Browse…", command=pick).grid(row=r, column=2, sticky="w", padx=8)
+        ttk.Label(b, text="Print photos", style="H2.TLabel").grid(row=15, column=0, sticky="w", columnspan=3, pady=(10, 2))
+        self.inbox = tk.StringVar(value=settings["photo_inbox"])
+        self.vision = tk.StringVar(value=settings["vision_model"])
+        ttk.Label(b, text="Photo folder").grid(row=16, column=0, sticky="w", pady=3)
+        ttk.Entry(b, textvariable=self.inbox, width=50).grid(row=16, column=1, sticky="ew", pady=3)
+        ttk.Button(b, text="Connect…", command=lambda: self.inbox.set(InboxDialog(self, self.inbox.get()).run() or self.inbox.get())
+                   ).grid(row=16, column=2, sticky="w", padx=8)
+        ttk.Label(b, text="Vision model").grid(row=17, column=0, sticky="w", pady=3)
+        self.visions = ttk.Combobox(b, textvariable=self.vision, width=48)
+        self.visions.grid(row=17, column=1, sticky="ew", pady=3)
+        ttk.Label(b, text="blank = auto (e.g. qwen2.5vl:7b)", style="Muted.TLabel").grid(row=17, column=2, sticky="w", padx=8)
         self.buttons([("Cancel", self.destroy, "TButton"), ("Save", self.save, "Accent.TButton")])
         self.test()
 
@@ -208,6 +219,7 @@ class SettingsDialog(Dialog):
         if not self.winfo_exists():
             return
         self.models.configure(values=models)
+        self.visions.configure(values=[""] + [m for m in models if any(h in m.lower() for h in core.VISION_HINTS)])
         if models and self.model.get() not in models:
             self.model.set(models[0])
         self.status.configure(text=msg)
@@ -220,6 +232,7 @@ class SettingsDialog(Dialog):
         for k, v in self.flags.items():
             s[k] = v.get()
         s["freecad_cmd"], s["projects_dir"] = self.fc.get().strip(), self.pdir.get().strip()
+        s["photo_inbox"], s["vision_model"] = self.inbox.get().strip(), self.vision.get().strip()
         try:
             s["bed"] = [float(v.get()) for v in self.bed]
         except ValueError:
@@ -351,6 +364,118 @@ class AppsDialog(Dialog):
         self.s["apps_custom"] = [c for c in self.s["apps_custom"] if c["id"] != a["id"]]
         self.s.save()
         self.refresh()
+
+
+def thumbnail(path, size=150):
+    """Tk image of a photo, or None without Pillow (Tk alone can't read JPEG)."""
+    try:
+        from PIL import Image, ImageOps, ImageTk
+        img = ImageOps.exif_transpose(Image.open(path))
+        img.thumbnail((size, size))
+        return ImageTk.PhotoImage(img)
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+class InboxDialog(Dialog):
+    """Connect the folder phone photos sync into (Google Drive, OneDrive, Dropbox or any folder)."""
+
+    def __init__(self, parent, current):
+        super().__init__(parent, "Connect a photo folder")
+        b = self.body
+        ttk.Label(b, text="Where do your print photos land?", style="H1.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(b, style="Muted.TLabel", wraplength=600, justify="left", text=(
+            "Photograph the print with your phone and let Google Drive, OneDrive or Dropbox upload it. PartForge "
+            "watches the synced folder on this PC and picks up new photos by itself.\n"
+            "Phone tip: Google Drive app ▸ ＋ ▸ Upload into \"PartForge Photos\", or turn on OneDrive camera upload.")
+        ).grid(row=1, column=0, sticky="w", pady=(2, 10))
+        self.var = tk.StringVar(value=current or "")
+        self.choices = ttk.Frame(b)
+        self.choices.grid(row=2, column=0, sticky="w")
+        folders = core.photo_folders()
+        if current and current not in [str(f) for _, f in folders]:
+            folders.insert(0, ("Current folder", Path(current)))
+        for label, path in folders:
+            self._choice(label, path)
+        ttk.Button(b, text="Choose another folder…", command=self.browse).grid(row=3, column=0, sticky="w", pady=8)
+        self.buttons([("Cancel", self.destroy, "TButton"), ("Connect", self.ok, "Accent.TButton")])
+
+    def _choice(self, label, path):
+        ttk.Radiobutton(self.choices, text=f"{label}\n{path}", value=str(path), variable=self.var).pack(anchor="w", pady=3)
+
+    def browse(self):
+        p = filedialog.askdirectory(parent=self, title="Folder your print photos sync into")
+        if p:
+            self._choice("Chosen folder", Path(p))
+            self.var.set(str(Path(p)))
+
+    def ok(self):
+        path = self.var.get().strip()
+        if not path:
+            return
+        Path(path).mkdir(parents=True, exist_ok=True)   # e.g. the "PartForge Photos" subfolder in Google Drive
+        self.result = path
+        self.destroy()
+
+
+class FeedbackDialog(Dialog):
+    """How did the print come out? Pick photos, tick what's wrong, add a note, send it to the AI."""
+    ISSUES = ("Too tight", "Too loose", "Wrong size", "Warped / lifted", "Layer split / weak", "Broke",
+              "Rough surface", "Looks good")
+
+    def __init__(self, parent, photos, inbox):
+        super().__init__(parent, "Print feedback")
+        b = self.body
+        ttk.Label(b, text="How did the print come out?", style="H1.TLabel").grid(row=0, column=0, sticky="w")
+        where = (f"{len(photos)} new photo(s) in {inbox}" if photos else f"No new photos in {inbox} yet." if inbox
+                 else "No photo folder connected: add photos from this PC, or connect one in the Prints tab.")
+        ttk.Label(b, text=where, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 8))
+        self.grid_frame = ttk.Frame(b)
+        self.grid_frame.grid(row=2, column=0, sticky="w")
+        self.picks, self._imgs = {}, []
+        for path in photos[:12]:
+            self.add_photo(path, True)
+        ttk.Button(b, text="Add photos from this PC…", command=self.browse).grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(b, text="What's wrong?", style="H2.TLabel").grid(row=4, column=0, sticky="w", pady=(8, 2))
+        chips = ttk.Frame(b)
+        chips.grid(row=5, column=0, sticky="w")
+        self.issues = {name: tk.BooleanVar() for name in self.ISSUES}
+        for i, name in enumerate(self.ISSUES):
+            ttk.Checkbutton(chips, text=name, variable=self.issues[name]).grid(row=i // 4, column=i % 4, sticky="w", padx=(0, 16), pady=2)
+        ttk.Label(b, text="Notes: where, how much, anything you measured").grid(row=6, column=0, sticky="w", pady=(10, 2))
+        self.notes = tk.Text(b, height=4, width=72, wrap="word", font=FONT, relief="solid", bd=1, padx=4, pady=3)
+        self.notes.grid(row=7, column=0, sticky="ew")
+        _tab_moves_focus(self.notes)
+        self.buttons([("Cancel", self.destroy, "TButton"), ("Save to print log", lambda: self.finish(False), "TButton"),
+                      ("Send to AI for redesign", lambda: self.finish(True), "Accent.TButton")])
+
+    def add_photo(self, path, on):
+        n = len(self.picks)
+        var = tk.BooleanVar(value=on)
+        self.picks[str(path)] = var
+        cell = ttk.Frame(self.grid_frame)
+        cell.grid(row=n // 4, column=n % 4, padx=4, pady=4, sticky="n")
+        img = thumbnail(path)
+        if img:
+            self._imgs.append(img)
+            ttk.Label(cell, image=img).pack()
+        ttk.Checkbutton(cell, text=Path(path).name[:24], variable=var).pack()
+
+    def browse(self):
+        for path in filedialog.askopenfilenames(parent=self, title="Photos of the print",
+                                                filetypes=[("Photos", "*.jpg *.jpeg *.png *.webp")]):
+            if str(Path(path)) not in self.picks:
+                self.add_photo(str(Path(path)), True)
+
+    def finish(self, redesign):
+        photos = [p for p, v in self.picks.items() if v.get()]
+        issues = [name for name, v in self.issues.items() if v.get()]
+        notes = "; ".join(t for t in (", ".join(issues), self.notes.get("1.0", "end").strip()) if t)
+        if not photos and not notes:
+            messagebox.showwarning("Print feedback", "Pick a photo or say how the print came out.", parent=self)
+            return
+        self.result = (photos, notes, redesign)
+        self.destroy()
 
 
 # ============================================================================ drawing
@@ -627,6 +752,7 @@ class DrawingCanvas(tk.Canvas):
                 self.app.set_param(name, text, "drawing")
             self.pending = False
             self.redraw()
+        self.commit_edit = lambda: close(True)   # what Enter does; also used by the tests
         ent.bind("<Return>", lambda e: close(True))
         ent.bind("<KP_Enter>", lambda e: close(True))
         ent.bind("<Escape>", lambda e: close(False))
@@ -885,6 +1011,7 @@ class App(tk.Tk):
         self.stop_evt = threading.Event()
         self.code_mtime = 0.0
         self.stream_start = None
+        self.models, self.inbox_count, self.feedback_pending = [], 0, None
 
         self.title(core.APP_NAME)
         self.geometry("1440x880")
@@ -906,6 +1033,7 @@ class App(tk.Tk):
         self.after(40, self._pump)
         self.after(30_000, self._autosave)
         self.after(1500, self._watch_code)
+        self.after(3000, self._watch_inbox)
         self.check_ai()
         self.show_welcome()
 
@@ -1001,6 +1129,8 @@ class App(tk.Tk):
         self.hand_menu = tk.Menu(self.hand, tearoff=0, postcommand=self._fill_hand_menu)
         self.hand.configure(menu=self.hand_menu)
         self.hand.pack(side="left")
+        self.photo_btn = ttk.Button(tb, text="📷 Print feedback", style="Tool.TButton", command=self.open_feedback)
+        self.photo_btn.pack(side="left", padx=(6, 0))
         ttk.Button(tb, text="⚙ Settings", style="Tool.TButton", command=self.open_settings).pack(side="right")
         self.refresh_send()
 
@@ -1017,6 +1147,8 @@ class App(tk.Tk):
         self.nb.add(self.map, text="Part Map")
         self.nb.add(self._research_tab(), text="Research")
         self.nb.add(self._code_tab(), text="Model code")
+        self.prints_tab = self._prints_tab()
+        self.nb.add(self.prints_tab, text="Prints")
         self.main.add(self.nb, weight=3)
         self.main.add(self._chat_pane(), weight=1)
 
@@ -1060,6 +1192,65 @@ class App(tk.Tk):
         pw.add(left, weight=1)
         pw.add(right, weight=2)
         return f
+
+    def _prints_tab(self):
+        f = ttk.Frame(self.nb, padding=10)
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Label(top, style="Muted.TLabel", text="Print ▸ photograph ▸ feedback ▸ AI redesign ▸ print again. "
+                  "Phone photos sync into the connected folder.").pack(side="left")
+        ttk.Button(top, text="📷 New print feedback…", style="Accent.TButton", command=self.open_feedback).pack(side="right")
+        ttk.Button(top, text="Photo folder…", command=self.choose_inbox).pack(side="right", padx=6)
+        self.inbox_lbl = ttk.Label(f, style="Muted.TLabel")
+        self.inbox_lbl.pack(anchor="w", pady=(6, 0))
+        pw = ttk.PanedWindow(f, orient="horizontal")
+        pw.pack(fill="both", expand=True, pady=(8, 0))
+        self.print_tree = ttk.Treeview(pw, columns=("when", "build", "photos", "status"), show="tree headings")
+        for col, text, w in (("#0", "Round", 70), ("when", "Date", 130), ("build", "Printed build", 95),
+                             ("photos", "Photos", 60), ("status", "Status", 170)):
+            self.print_tree.heading(col, text=text, anchor="w")
+            self.print_tree.column(col, width=w, anchor="w")
+        self.print_tree.bind("<<TreeviewSelect>>", lambda e: self._show_print())
+        right = ttk.Frame(pw)
+        self.print_thumbs = ttk.Frame(right)
+        self.print_thumbs.pack(fill="x")
+        self.print_text = ScrolledText(right, wrap="word", font=FONT, relief="flat", padx=8, pady=6, height=10)
+        self.print_text.pack(fill="both", expand=True, pady=(6, 0))
+        pw.add(self.print_tree, weight=1)
+        pw.add(right, weight=2)
+        return f
+
+    def _refresh_prints(self):
+        t = self.print_tree
+        sel = t.selection()
+        t.delete(*t.get_children())
+        for p in reversed(self.project.data.get("prints", [])):
+            t.insert("", "end", iid=str(p["id"]), text=f"#{p['id']}", values=(
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(p["time"])), p["build"], len(p["photos"]), p["status"]))
+        if sel and t.exists(sel[0]):
+            t.selection_set(sel[0])
+        inbox = self.settings["photo_inbox"]
+        self.inbox_lbl.configure(text=f"Watching {inbox} for new photos." if inbox else "No photo folder connected yet.")
+
+    def _show_print(self):
+        sel = self.print_tree.selection()
+        rec = next((p for p in self.project.data.get("prints", []) if sel and str(p["id"]) == sel[0]), None)
+        for w in self.print_thumbs.winfo_children():
+            w.destroy()
+        self._print_imgs = []
+        self.print_text.delete("1.0", "end")
+        if not rec:
+            return
+        for rel in rec["photos"][:6]:
+            path = self.project.folder / rel
+            img = thumbnail(path, 130)
+            lbl = ttk.Label(self.print_thumbs, image=img, cursor="hand2") if img else \
+                ttk.Label(self.print_thumbs, text=Path(rel).name, cursor="hand2", style="Muted.TLabel")
+            lbl.pack(side="left", padx=3)
+            lbl.bind("<Button-1>", lambda e, path=path: os.startfile(path))
+            self._print_imgs.append(img)
+        self.print_text.insert("1.0", f"Notes: {rec['notes'] or '-'}\n\nWhat the photos show:\n"
+                               f"{rec.get('observations') or '-'}\n\nStatus: {rec['status']}")
 
     def _code_tab(self):
         f = ttk.Frame(self.nb, padding=10)
@@ -1169,6 +1360,7 @@ class App(tk.Tk):
 
     def _ai_ok(self, models):
         self.llm_ok = bool(models)
+        self.models = models
         if models and self.settings["model"] not in models:
             self.settings["model"] = models[0]
             self.settings.save()
@@ -1328,6 +1520,7 @@ class App(tk.Tk):
         self.src_tree.delete(*self.src_tree.get_children())
         for i, s in enumerate(self.project.data["research"]["sources"], start=1):
             self.src_tree.insert("", "end", text=f"[{i}] {s['title']}", values=(s["url"],))
+        self._refresh_prints()
         msgs = core.build_messages(self.project, self.settings, self.report)
         used = sum(core.est_tokens(m["content"]) for m in msgs)
         self.st_ctx.configure(text=f"context ≈ {used / 1000:.1f}k / {self.settings['context_tokens'] // 1000}k tokens")
@@ -1484,6 +1677,13 @@ class App(tk.Tk):
             proj.data["builds"] += 1
             probs = core.report_problems(rep, proj.params, self.settings["bed"])
             self.st_build.configure(text=f"Built in {rep.get('seconds', 0):.1f} s" + (f"  ·  ⚠ {len(probs)} check(s)" if probs else "  ·  checks passed"))
+            rec = self.feedback_pending
+            if source == "ai" and rec and not probs:
+                self.feedback_pending = None
+                rec["status"] = f"redesigned → build {proj.data['builds']}"
+                quick = apps.quick_app(self.settings)
+                self.say("PartForge", f"Redesign for print feedback #{rec['id']} is built. "
+                         + (f"Press ▶ Send to {quick['name']} to print it again." if quick else "Send it to your slicer to print it again."), "sys")
             if source == "ai":
                 for m in proj.data["markups"]:
                     if m["status"] == "open":
@@ -1784,6 +1984,98 @@ class App(tk.Tk):
                      "\n\nMeanwhile, here's a starter plate you can edit on the drawing.", "sys")
             self.request_build("user", 0)
 
+    # --------------------------------------------------------------- print feedback loop
+    def inbox_photos(self):
+        if not self.project or not self.settings["photo_inbox"]:
+            return []
+        return core.new_photos(self.settings["photo_inbox"], self.project.data.get("photo_since", 0))
+
+    def _watch_inbox(self):
+        # ponytail: scans the folder on the UI thread every 4 s; move to a thread if a huge camera folder lags
+        n = len(self.inbox_photos())
+        self.photo_btn.configure(text=f"📷 Print feedback ({n} new)" if n else "📷 Print feedback",
+                                 style="Send.TButton" if n else "Tool.TButton")
+        if n > self.inbox_count:
+            self.st_build.configure(text=f"{n} new print photo(s): click 📷 Print feedback")
+        self.inbox_count = n
+        self.after(4000, self._watch_inbox)
+
+    def choose_inbox(self):
+        path = InboxDialog(self, self.settings["photo_inbox"]).run()
+        if path:
+            self.settings["photo_inbox"] = path
+            self.settings.save()
+            if self.project:
+                self._refresh_prints()
+            self.st_build.configure(text=f"Watching {path} for print photos")
+        return path
+
+    def open_feedback(self):
+        if not self.project:
+            return
+        if not self.settings["photo_inbox"]:
+            self.choose_inbox()
+        res = FeedbackDialog(self, self.inbox_photos(), self.settings["photo_inbox"]).run()
+        if res:
+            self.submit_feedback(*res)
+
+    def submit_feedback(self, photos, notes, redesign):
+        proj = self.project
+        prints = proj.data.setdefault("prints", [])
+        rid = max((p["id"] for p in prints), default=0) + 1
+        dest = proj.folder / "photos" / f"print-{rid}"
+        dest.mkdir(parents=True, exist_ok=True)
+        rels = []
+        for src in photos:
+            shutil.copy2(src, dest / Path(src).name)
+            rels.append(f"photos/print-{rid}/{Path(src).name}")
+        revs = proj.data.get("revisions", [])
+        rec = {"id": rid, "time": time.time(), "build": proj.data["builds"], "rev": revs[-1]["rev"] if revs else "",
+               "photos": rels, "notes": notes, "observations": "", "status": "logged"}
+        prints.append(rec)
+        proj.data["photo_since"] = time.time()
+        self.inbox_count = 0
+        self.save()
+        self.say("PartForge", f"📷 Print feedback #{rid}: {len(rels)} photo(s). {notes}", "sys")
+        self.nb.select(self.prints_tab)
+        self.refresh_all()
+        self.print_tree.selection_set(str(rid))
+        if redesign:
+            self.redesign_from(rec)
+
+    def redesign_from(self, rec):
+        if not self.llm_ok:
+            self.say("PartForge", NO_AI_HELP.format(url=self.settings["base_url"]), "err")
+            return
+        rec["status"] = "with the AI"
+        proj, settings = self.project, self.settings
+        model = core.pick_vision_model(settings, self.models)
+        if not rec["photos"] or not model:
+            if rec["photos"]:
+                self.say("PartForge", "No vision model installed, so the AI goes by your notes. To let it look at "
+                         "the photos run:  ollama pull qwen2.5vl:7b", "sys")
+            self._send_feedback(rec, proj)
+            return
+        self.st_build.configure(text=f"{model} is looking at the photos…")
+        paths = [proj.folder / rel for rel in rec["photos"]]
+
+        def seen(obs):
+            rec["observations"] = obs.strip()
+            self._send_feedback(rec, proj)
+
+        def failed(e):
+            self.say("PartForge", f"Photo analysis failed ({e}). Going by your notes.", "err")
+            self._send_feedback(rec, proj)
+        self.bg(lambda: core.describe_photos(settings, model, paths, proj, rec["notes"]), seen, failed)
+
+    def _send_feedback(self, rec, proj):
+        if proj is not self.project:
+            return
+        self.feedback_pending = rec
+        self.mark_dirty()
+        self._refresh_prints()
+        self.send(core.feedback_message(rec))
+
     # --------------------------------------------------------------- revisions & export
     def save_revision(self, label=None):
         if not self.project:
@@ -1855,7 +2147,9 @@ class App(tk.Tk):
             "(=width*2). The model rebuilds and everything updates.\n"
             "3. Right-click the drawing to redline a change for the AI. Or just ask in the chat.\n"
             "4. ▶ Send hands the printable STL files to your slicer. Pick the app with the ▾ arrow.\n"
-            "5. Model by hand: open the part in FreeCAD or another CAD program, edit model.py in your editor (it "
+            "5. Printed it? Take phone photos (Google Drive / OneDrive / Dropbox sync them here), click 📷 Print "
+            "feedback, tick what's wrong and send it: a vision model looks at the photos and the AI redesigns.\n"
+            "6. Model by hand: open the part in FreeCAD or another CAD program, edit model.py in your editor (it "
             "rebuilds on save), or import a STEP body for the AI to build on.\n\n"
             "Everything saves automatically: every 30 seconds and when you close."), parent=self)
 

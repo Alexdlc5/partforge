@@ -81,7 +81,10 @@ ent = next(w for w in box.winfo_children() if w.winfo_class() == "Entry")
 ent.delete(0, "end")
 ent.insert(0, "70")
 shot("2_modify_box")
+ent.focus_force()
 ent.event_generate("<Return>")
+if a.drawing.editing:   # Windows withholds keyboard focus while another app is in front: commit like Enter
+    a.drawing.commit_edit()
 idle()
 assert a.project.params["base_len"]["value"] == 70
 assert a.report["parts"]["bracket"]["bbox"][0] == 70, a.report["parts"]["bracket"]["bbox"]
@@ -161,6 +164,34 @@ assert any("doesn't fit" in p for p in appmod.core.report_problems(a.report, a.p
 a.drawing.redraw()
 shot("7_bed_warning")
 settings["bed"] = [220, 220, 250]
+
+# 10b. Print feedback loop: a phone photo syncs into the folder -> button lights up -> feedback -> vision model
+#      looks at it -> design AI redesigns -> rebuild -> "send it again"
+inbox = Path(tempfile.mkdtemp(prefix="pf_inbox_"))
+settings["photo_inbox"] = str(inbox)
+from PIL import Image  # noqa: E402
+Image.new("RGB", (900, 600), (205, 120, 40)).save(inbox / "IMG_0001.jpg")
+wait(lambda: a.inbox_count == 1, "new photo noticed", 15)
+assert "1 new" in a.photo_btn.cget("text")
+shot("7b_photo_waiting")
+dlg = appmod.FeedbackDialog(a, a.inbox_photos(), str(inbox))
+dlg.issues["Layer split / weak"].set(True)
+dlg.notes.insert("1.0", "cracked at the bend after one day")
+dlg.finish(True)
+assert dlg.result[0] == [str(inbox / "IMG_0001.jpg")] and dlg.result[1].startswith("Layer split / weak; cracked")
+a.submit_feedback(*dlg.result)
+rec = a.project.data["prints"][-1]
+wait(lambda: rec["status"].startswith("redesigned"), "redesign built from print feedback", 120)
+idle()
+assert (a.project.folder / rec["photos"][0]).exists(), "photo copied into the project"
+assert "layer split" in rec["observations"].lower(), rec["observations"]
+assert "vision with 1 image(s)" in fake_llm.calls
+assert a.project.params["thickness"]["value"] == 8 and a.report["parts"]["bracket"]["bbox"][2] == 35
+assert "PRINT FEEDBACK #1" in core.build_messages(a.project, settings, a.report)[0]["content"]
+wait(lambda: a.inbox_count == 0, "inbox cleared after import", 15)
+a.nb.select(a.prints_tab)
+shot("7c_prints_tab")
+a.nb.select(0)
 
 # 11. New-part dialog with a template -> the enclosure builds as two printable parts
 dlg = appmod.IntakeDialog(a)

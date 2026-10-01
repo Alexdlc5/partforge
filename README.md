@@ -28,6 +28,10 @@ own machine: no cloud, no credits, and your designs stay private.
    AI context all follow.
 5. **Print.** One click sends the STLs to your slicer (Creality Print, Orca, Bambu Studio, Prusa, Cura
    or any program you add).
+6. **Photograph the print, get a redesign.** Snap the print with your phone. Google Drive, OneDrive
+   or Dropbox sync the photo into a folder PartForge watches, and the 📷 Print feedback button lights
+   up. Tick what's wrong (too tight, warped, layer split…), add a note, and send. A local vision model
+   describes what the photos show, the design AI redesigns, the part rebuilds, and you print again.
 
 | Edit a driving dimension | The AI's memory as a diagram |
 |---|---|
@@ -53,6 +57,10 @@ web search. The AI side is a scripted stand-in server, shown as "fake-coder".</s
   quick-send app from a dropdown; add any program in a dialog.
 - **Model by hand.** Open in FreeCAD, SOLIDWORKS or your STEP app, or edit `model.py` in VS Code; it
   rebuilds on save. Import STEP bodies modeled elsewhere for the AI to build on.
+- **Print feedback loop.** Connect any folder your phone photos sync into: Google Drive, OneDrive camera
+  upload, Dropbox, or a plain folder. No cloud sign-in code is needed, because the sync app does the
+  work. Every round is logged in the Prints tab with photos, notes, what the vision model saw, and
+  which build it led to. The AI remembers the last rounds when it designs.
 - **Engineering hygiene.** Undo/redo, named revisions (REV A, B…) in the title block, SVG drawing
   export, autosave every 30 s and on exit.
 
@@ -126,6 +134,9 @@ flowchart LR
    (8 GB GPU) or `qwen2.5-coder:14b` (12 GB+). PartForge starts Ollama hidden in the background.
    LM Studio or any OpenAI-compatible server also works (Settings).
 4. Run `python install.py` for Start Menu and Desktop shortcuts, or double-click `PartForge.pyw`.
+5. *Optional, for print photos:* run `ollama pull qwen2.5vl:7b` so the AI can see your photos (otherwise
+   it goes by your notes), and `pip install pillow` for photo thumbnails and faster uploads to the model.
+   Then use **Prints ▸ Photo folder…** to connect the folder your phone syncs into.
 
 ### Adding a connected app
 
@@ -154,6 +165,7 @@ The end-to-end test covers:
 - equations and units, range guard, undo
 - AI breaks the model → automatic repair
 - redline → change, and external editor → rebuild
+- print photo syncs in → feedback → vision model → redesign → rebuild
 - send-to, revisions, SVG export, bed check
 - templates, and save/reopen
 
