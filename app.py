@@ -1028,6 +1028,7 @@ class App(tk.Tk):
         self.code_mtime = 0.0
         self.stream_start = None
         self.models, self.inbox_count, self.feedback_pending = [], 0, None
+        self.server_up = False
 
         self.title(core.APP_NAME)
         self.geometry("1440x880")
@@ -1322,6 +1323,7 @@ class App(tk.Tk):
         ttk.Label(inner, text="SETUP", style="WMuted.TLabel", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(22, 4))
         self.setup_lbl = ttk.Label(inner, style="WMuted.TLabel", font=FONT, justify="left")
         self.setup_lbl.pack(anchor="w")
+        self.pull_btn = ttk.Button(inner, style="Accent.TButton", command=self.download_model)
         self._setup_text()
         recent = [r for r in self.settings["recent"] if (Path(r) / "project.json").exists()]
         if recent:
@@ -1375,13 +1377,13 @@ class App(tk.Tk):
         self.bg(lambda: core.ensure_server(self.settings), self._ai_ok, self._ai_down)
 
     def _ai_ok(self, models):
-        self.llm_ok = bool(models)
+        self.llm_ok, self.server_up = bool(models), True
         self.models = models
         if models and self.settings["model"] not in models:
-            self.settings["model"] = models[0]
+            self.settings["model"] = core.pick_design_model(self.settings, models)
             self.settings.save()
         name = self.settings["model"] or "no model installed"
-        self.st_ai.configure(text=f"AI ● {name}" if models else "AI ○ server up, no model: ollama pull qwen2.5-coder:7b")
+        self.st_ai.configure(text=f"AI ● {name}" if models else "AI ○ no model yet: download one from the start screen")
         self.model_lbl.configure(text=name)
         self._setup_text()
 
@@ -1392,12 +1394,38 @@ class App(tk.Tk):
         send = apps.quick_app(self.settings)
         lines = [f"✓  FreeCAD   {fc}" if fc else "✗  FreeCAD not found: install it from freecad.org (free)",
                  f"✓  Local AI   {self.settings['model']}" if self.llm_ok else
-                 "✗  Local AI offline: install Ollama (ollama.com), then run   ollama pull qwen2.5-coder:7b",
+                 "✗  No AI model yet: download one below" if self.server_up else
+                 "✗  Local AI not installed: run setup.bat in the PartForge folder (or install Ollama from ollama.com)",
                  f"✓  Quick send   {send['name']}" if send else "–  No slicer found (optional): add one in Send ▸ Manage apps"]
         self.setup_lbl.configure(text="\n".join(lines))
+        if self.server_up and not self.llm_ok:
+            self.pull_btn.configure(text=f"Download AI model ({core.recommended_model()})")
+            self.pull_btn.pack(anchor="w", pady=(8, 0))
+        else:
+            self.pull_btn.pack_forget()
+
+    def download_model(self):
+        name = core.recommended_model()
+        if not messagebox.askyesno("Download AI model", f"Download {name}? It's several GB, picked to fit this PC's "
+                                   "graphics card, and runs entirely on this computer.", parent=self):
+            return
+        self.pull_btn.configure(state="disabled")
+
+        def progress(frac, status):
+            self.q.put((lambda _: self.st_ai.configure(text=f"AI ⇣ downloading {name}: {frac:.0%}"), None))
+
+        def failed(e):
+            self.say("PartForge", f"Model download failed: {e}", "err")
+            self.pull_btn.configure(state="normal")
+        self.bg(lambda: core.pull_model(self.settings, name, progress), lambda _: self._pulled(name), failed)
+
+    def _pulled(self, name):
+        self.settings["model"] = name
+        self.settings.save()
+        self.check_ai()
 
     def _ai_down(self, e):
-        self.llm_ok = False
+        self.llm_ok = self.server_up = False
         self._setup_text()
         self.st_ai.configure(text="AI ○ offline (Settings)")
         self.model_lbl.configure(text="offline")

@@ -136,18 +136,36 @@ flowchart LR
 
 ## Install
 
-**Download:** use **Code ▸ Download ZIP** and unzip it anywhere, or run
-`git clone https://github.com/Alexdlc5/partforge.git`.
+### Quick start (Windows)
 
-1. **Python 3.10+** from python.org (Windows).
-2. **FreeCAD 1.x** from freecad.org. It's found automatically.
-3. **A local AI.** Install [Ollama](https://ollama.com), then run `ollama pull qwen2.5-coder:7b`
-   (8 GB GPU) or `qwen2.5-coder:14b` (12 GB+). PartForge starts Ollama hidden in the background.
-   LM Studio or any OpenAI-compatible server also works (Settings).
-4. Run `python install.py` for Start Menu and Desktop shortcuts, or double-click `PartForge.pyw`.
-5. *Optional, for print photos:* run `ollama pull qwen2.5vl:7b` so the AI can see your photos (otherwise
-   it goes by your notes), and `pip install pillow` for photo thumbnails and faster uploads to the model.
-   Then use **Prints ▸ Photo folder…** to connect the folder your phone syncs into.
+```
+git clone https://github.com/Alexdlc5/partforge.git
+```
+
+Or use **Code ▸ Download ZIP** and unzip it anywhere. Then **double-click `setup.bat`** in the folder.
+It checks for everything PartForge needs and asks before installing each missing piece:
+
+| Needs | Why | setup.bat does |
+|---|---|---|
+| Python 3.10+ | runs the app | installs Python 3.12 with winget if missing |
+| FreeCAD 1.x | builds every part | installs FreeCAD with winget if missing |
+| Ollama | runs the AI on your PC, nothing goes to the cloud | installs Ollama with winget if missing |
+| An AI model | designs the parts | downloads `qwen2.5-coder` sized for your graphics card: 14B for 10 GB+, 7B for 6 GB+, otherwise 3B |
+| *optional* `qwen2.5vl:7b` | lets the AI look at photos of your prints | asks |
+| *optional* Pillow | photo thumbnails | asks |
+
+Last, it adds **PartForge** to the Start Menu and Desktop. If you skip the model download, the app's
+start screen offers a **Download AI model** button later.
+
+### Manual install
+
+1. Python 3.10+ (python.org) and FreeCAD 1.x (freecad.org). FreeCAD is found automatically.
+2. [Ollama](https://ollama.com), then `ollama pull qwen2.5-coder:14b` (or `:7b` for 6–8 GB GPUs).
+   PartForge starts Ollama hidden in the background. LM Studio or any OpenAI-compatible server also
+   works (Settings).
+3. `python install.py` for shortcuts, or double-click `PartForge.pyw`.
+4. Optional: `ollama pull qwen2.5vl:7b` and `pip install pillow` for print photos. Then use
+   **Prints ▸ Photo folder…** to connect the folder your phone syncs into.
 
 ### Adding a connected app
 

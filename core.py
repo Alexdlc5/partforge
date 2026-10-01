@@ -85,7 +85,7 @@ PRESETS = {"Ollama (local)": "http://127.0.0.1:11434/v1", "LM Studio (local)": "
 
 
 class Settings(dict):
-    DEFAULTS = {"base_url": PRESETS["Ollama (local)"], "model": "", "api_key_enc": "", "context_tokens": 16384,
+    DEFAULTS = {"base_url": PRESETS["Ollama (local)"], "model": "", "api_key_enc": "", "context_tokens": 8192,
                 "lean_coding": True, "fast_reasoning": True, "auto_fix": True, "web_search": True,
                 "freecad_cmd": "", "projects_dir": str(DEFAULT_PROJECTS), "recent": [], "last_project": "",
                 "quick_send": "creality-print", "apps_custom": [], "app_paths": {}, "bed": [220, 220, 250],
@@ -181,8 +181,9 @@ class LLMError(Exception):
     pass
 
 
-def _request(settings, path, body=None, timeout=10):
-    url = settings["base_url"].rstrip("/") + path
+def _request(settings, path, body=None, timeout=10, native=False):
+    base = settings["base_url"].rstrip("/")
+    url = (base.removesuffix("/v1") if native else base) + path
     headers = {"Content-Type": "application/json", "User-Agent": f"{APP_NAME}/{VERSION}"}
     if settings.api_key:
         headers["Authorization"] = "Bearer " + settings.api_key
@@ -234,8 +235,10 @@ THINK = re.compile(r"<think>.*?(</think>|$)", re.S)
 def chat(settings, messages, on_delta=None, stop=None, max_tokens=None, temperature=0.2):
     """Streams an OpenAI-compatible chat completion; returns the full text (think blocks removed)."""
     model = settings.get("model") or (list_models(settings) or [""])[0]
-    body = {"model": model, "messages": messages, "stream": True, "temperature": temperature,
-            "max_tokens": max_tokens or min(4096, settings["context_tokens"] // 3)}
+    max_tokens = max_tokens or min(4096, settings["context_tokens"] // 3)
+    if ":11434" in settings["base_url"]:
+        return _chat_ollama(settings, model, messages, on_delta, stop, max_tokens, temperature)
+    body = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens}
     out = []
     with _request(settings, "/chat/completions", body, timeout=900) as r:
         for raw in r:
@@ -315,6 +318,45 @@ def image_data_url(path, max_px=1280):
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
+def _size_b(name):
+    m = re.search(r"(\d+(?:\.\d+)?)b\b", name.lower())
+    return float(m[1]) if m else 0.0
+
+
+def pick_design_model(settings, models):
+    """The chosen model, else the biggest installed coding model; never a vision model."""
+    if settings.get("model") in models:
+        return settings["model"]
+    text = [m for m in models if not any(h in m.lower() for h in VISION_HINTS)] or models
+    coders = [m for m in text if "coder" in m.lower()]
+    return max(coders or text, key=_size_b) if (coders or text) else ""
+
+
+def recommended_model():
+    """Design model sized for this PC's NVIDIA graphics memory (same rule as setup.ps1)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5, creationflags=NO_WINDOW).stdout
+        vram = int(out.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        vram = 0
+    return "qwen2.5-coder:14b" if vram >= 10000 else "qwen2.5-coder:7b" if vram >= 6000 else "qwen2.5-coder:3b"
+
+
+def pull_model(settings, name, on_progress=None):
+    """Download a model through Ollama's API, reporting 0..1 progress."""
+    base = settings["base_url"].split("/v1")[0]
+    req = urllib.request.Request(base + "/api/pull", data=json.dumps({"model": name, "stream": True}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=3600) as r:
+        for line in r:
+            msg = json.loads(line)
+            if msg.get("error"):
+                raise LLMError(msg["error"])
+            if on_progress and msg.get("total"):
+                on_progress(msg.get("completed", 0) / msg["total"], msg.get("status", ""))
+
+
 def pick_vision_model(settings, models):
     if settings.get("vision_model") in models:
         return settings["vision_model"]
@@ -340,6 +382,40 @@ def feedback_message(record):
             f"My notes: {record['notes'] or '(none)'}\n"
             f"What the photos show: {record['observations'] or '(no vision model, so go by my notes)'}\n"
             "Redesign the part to fix these problems and keep what works. Say briefly what you changed.")
+
+
+def _chat_ollama(settings, model, messages, on_delta, stop, max_tokens, temperature):
+    """Ollama's native API: unlike its OpenAI-compatible one it honours num_ctx, so long design prompts aren't
+    silently cut to the 4k default. Images go in a message's "images" list instead of content parts."""
+    msgs = []
+    for m in messages:
+        c = m["content"]
+        if isinstance(c, list):
+            msgs.append({"role": m["role"], "content": "\n".join(p["text"] for p in c if p.get("type") == "text"),
+                         "images": [p["image_url"]["url"].split(",", 1)[1] for p in c if p.get("type") == "image_url"]})
+        else:
+            msgs.append({"role": m["role"], "content": c})
+    body = {"model": model, "messages": msgs, "stream": True,
+            "options": {"num_ctx": settings["context_tokens"], "num_predict": max_tokens, "temperature": temperature}}
+    out = []
+    with _request(settings, "/api/chat", body, timeout=900, native=True) as r:
+        for raw in r:
+            if stop is not None and stop.is_set():
+                break
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if msg.get("error"):
+                raise LLMError(f"Ollama: {msg['error']}")
+            piece = msg.get("message", {}).get("content") or ""
+            if piece:
+                out.append(piece)
+                if on_delta:
+                    on_delta(piece)
+            if msg.get("done"):
+                break
+    return THINK.sub("", "".join(out)).strip()
 
 
 def asker(settings):
@@ -1061,6 +1137,10 @@ if __name__ == "__main__":
         assert image_data_url(new).startswith("data:image/")
     assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b", "qwen2.5vl:7b"]) == "qwen2.5vl:7b"
     assert pick_vision_model({"vision_model": ""}, ["qwen2.5-coder:7b"]) == ""
+    assert pick_design_model({"model": ""}, ["qwen2.5vl:7b", "qwen2.5-coder:7b", "qwen2.5-coder:14b", "llama3:8b"]) == "qwen2.5-coder:14b"
+    assert pick_design_model({"model": "llama3:8b"}, ["qwen2.5-coder:14b", "llama3:8b"]) == "llama3:8b", "user's pick wins"
+    assert pick_design_model({"model": ""}, ["qwen2.5vl:7b"]) == "qwen2.5vl:7b" and pick_design_model({}, []) == ""
+    assert recommended_model().startswith("qwen2.5-coder:")
     pick = lambda **b: (match_template(b) or ("none",))[0]
     assert pick(name="screw") == "Screw / bolt" and pick(name="M8 bolts") == "Screw / bolt"
     assert pick(name="hex nut") == "Nut" and pick(name="washer for M6") == "Washer"
